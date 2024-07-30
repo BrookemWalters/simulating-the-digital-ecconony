@@ -1,0 +1,293 @@
+---
+title: "Simulating the DE"
+format: html
+editor: visual
+---
+
+# Prepare the Environment
+
+```{r}
+library(readxl)
+library(MASS)
+library(ggdag)
+library(dagitty)
+library(tidyverse)
+```
+
+# Wrangle the Data
+Extract the Digital Economy Real Gross Output by Industry"
+
+Create two data sets, one aggregated to the sub-attribute level and the other as granular
+The data contains subtotals which inflates the totals, those need to be removed
+We also want to understand how the market shifts over time, so I am input that variable into the simulation
+
+```{r}
+# read in the data
+de22 <- read_excel("DE22.xlsx") %>% 
+    filter(
+    Measurement == "Digital Economy Real Gross Output by Industry",
+    # remove 0s
+    Value > 0) 
+  
+
+# remove subtotals, which I've annotated with "_TOTAL" in excel
+#this allows for analysis of each industry at a granular level
+gi_output <-  de22 %>% 
+   filter(!str_detect(MicroAttribute, regex("_TOTAL", ignore_case = TRUE)))
+
+
+
+# To make this easier to digest, I want look at the data at the third level.
+# The BEA categorizes industries  down to 5 levels, and it's not consistent between industries
+#  I want aggregate industries down to the 3 level which I called "sub-attributes" 
+
+# create the summary for each year
+# first I would like remove my labels so I can aggregate the totals together
+# i'll use this data again
+sub_industry_output<-  de22 %>% 
+    mutate(
+      Subcategory = str_replace(Subcategory, "_.*", ""),
+      MicroAttribute = str_replace(MicroAttribute, "_.*", ""),
+      Attribute = str_replace(SubAttribute, "_.*", ""),
+      SubAttribute = str_replace(SubAttribute, "_.*", "")) %>%
+    # remove these sub totals,  as all observations fall in one of the other
+    filter(Category != "All Industries" & Category != "Private industries",
+           # remove the granular category keeping only the observations totaled at the sub-attribute level
+           SubAttribute == MicroAttribute)
+
+# these categories have subtotals which for ease I'll remove manually
+levels_remove <- c(
+  "Arts, entertainment, recreation, accommodation, and food services",
+  "Information",
+  "Educational services, health care, and social assistance",
+  "Finance, insurance, real estate, rental, and leasing",
+  "Government",
+  "Manufacturing",
+  "Professional and business services")
+
+sub_industry_output  <- sub_industry_output %>%
+  filter(!SubAttribute %in% levels_remove) %>%
+  arrange(Year)%>%
+  group_by(Category, Subcategory, Attribute) %>%
+  mutate(Yearly_Change = Value - lag(Value),
+         YOY = round(Yearly_Change / lag(Value), 2)) %>% 
+  # renaming these columns so they make more sense
+  dplyr::select(
+    "Sector" = Subcategory,
+    "Industry" = Attribute,
+    "Specialization" = Category,
+    Year,
+    Value,
+    Yearly_Change,
+    YOY) 
+
+
+
+
+# Just the yearly Totals
+gi_yearly_growth <-  de22 %>%
+  filter(Category == "All Industries") %>%  
+  dplyr::select(Category, Value, Year) %>%
+  arrange(Year) %>%
+  mutate(Yearly_Change = Value - lag(Value),
+         YOY = round(Yearly_Change / lag(Value), 2))
+    # renaming these columns so they make more sense
+ 
+
+```
+
+
+# Collect Statistics for Simulation
+```{r}
+sub_industry_ss <- sub_industry_output %>%
+  filter(Year != 2017) %>% 
+  group_by(Specialization) %>%
+  summarise(
+    Mean_Value = round(mean(Value), 2),
+    STD_Value = round(sd(Value), 2),
+    Mean_Change = round(mean(Yearly_Change), 2),
+    STD_Change = round(sd(Yearly_Change), 2),
+    Mean_YOY = round(mean(YOY), 2),
+    STD_YOY = round(sd(YOY), 2))
+
+sub_industry_ss
+```
+
+
+
+# I definetly want to turn this into an interactive graph!
+```{r}
+sub_industry_output$Year <- as.factor(sub_industry_output$Year)
+
+sub_industry_output %>%
+  filter(Year != 2017) %>% 
+# Scatter plot of growth rates (YOY) over years
+ggplot( aes(x = Year, y = YOY, color = Specialization)) +
+  geom_line(aes(group = Specialization), alpha = 0.5) + 
+  theme_minimal() +
+  labs(
+    title = "Growth Rates (YOY) by Specialization Over Years",
+    x = "Year",
+    y = "YOY Growth Rate",
+    color = "Specialization") +
+  theme(legend.position="none")
+
+```
+
+```{r}
+
+
+hist(sub_industry_output$YOY, breaks = 6, col = "lightblue", main = "Histogram of Data",
+     xlab = "Data", ylab = "Frequency")
+
+```
+
+
+
+```{r}
+# Function to perform Monte Carlo simulation
+perform_monte_carlo <- function(data, n = 1000) {
+  # Initialize a list to store the results
+  results <- list()
+  
+  for (i in 1:nrow(data)) {
+    specialization <- data$Specialization[i]
+    
+    # Simulate Value and Change
+    growth_rate <- data$Mean_YOY[i] 
+    sim_value <- rnorm(n, mean = data$Mean_Value[i] * (1 + growth_rate), sd = data$STD_Value[i])
+    sim_change <- rnorm(n, mean = data$Mean_Change[i] * (1 + growth_rate), sd = data$STD_Change[i])
+    
+    # Calculate the sum of Value and Change
+    sim_sum <- sim_value + sim_change
+    
+    # Create a data frame for the current specialization
+    sub_industry_sims <- data.frame(
+      Specialization = specialization,
+      Simulation_Value = sim_value,
+      Simulation_Change = sim_change,
+      Sum_Value_Change = sim_sum
+    )
+    
+    # Append to the results list
+    results[[i]] <- sub_industry_sims
+  }
+  
+  # Combine all results into a single data frame
+  final_results <- bind_rows(results)
+  
+  return(final_results)
+}
+
+# Perform Monte Carlo simulation
+simulation_results <- perform_monte_carlo(sub_industry_ss)
+
+# View the results
+head(simulation_results)
+```
+
+
+
+
+
+```{r}
+giy_dag <- dagify(
+  Output ~ Category + Year,
+  YOY ~ Output)
+
+# Plot the DAG
+
+ggdag(giy_dag)
+```
+
+       
+ 
+Subcategory Attribute   / Gross Output Value \| Year-over-Year Growth \| Year
+
+# summary statisitcs for the aggregated industries entire data set
+
+```{r}
+gross_total <-  de22 %>% 
+  filter(Measurement == "Digital Economy Real Gross Output by Industry",
+         MicroAttribute == "All Industries_TOTAL_MA")
+
+summary(gross_total$Value)
+summary(gross_industry_output$Value)
+summary(gross_industry_output_totals$Value)
+```
+
+## what do the summary stats look like by category?
+
+```{r}
+# library(ggforce)
+# 
+# 
+# # plot each category
+# filtered_data <- gross_industry_output_totals %>%
+#   filter(Category != "All Industries",
+#          Year == 2022)
+# 
+# 
+# num_categories <- length(unique(filtered_data$Category))
+# 
+# 
+# for (i in 1:num_categories) {
+#   plot <- filtered_data %>%
+#     ggplot(aes(y = Value, color = Category)) +
+#     geom_boxplot() +
+#     facet_wrap_paginate(~ Category, scales = "free", ncol = 1, nrow = 1, page = i) +
+#     theme_bw() +
+#     theme(legend.position = "none")
+# 
+#   print(plot)
+# }
+
+```
+
+histogram of industry total for 2022
+
+```{r}
+gross_industry_output22 <- gross_industry_output %>% 
+  filter(Year == 2022)
+
+hist(gross_industry_output22$Bil_Dols, breaks = 5, col = "lightblue", main = "Histogram of Data",
+     xlab = "Data", ylab = "Frequency")
+summary(gross_industry_output22$Value)
+```
+
+```{r}
+gross_industry_totals22 <- gross_industry_output_totals %>% 
+  filter(Year == 2022)
+
+hist(gross_industry_totals22$Bil_Dols, breaks = 5, col = "lightblue", main = "Histogram of Data",
+     xlab = "Data", ylab = "Frequency")
+summary(gross_industry_totals22$Value)
+```
+
+```{r}
+data<- gross_industry_totals22$Value
+
+
+fit <- fitdistr(data, "normal")
+
+mean_fit <- fit$estimate["mean"]
+sd_fit <- fit$estimate["sd"]
+
+fit
+```
+
+```{r}
+x <- seq(min(data), max(data), length = 100)
+normal_curve <- dnorm(x, mean = mean_fit, sd = sd_fit)
+normal_density <- dnorm(x, mean = mean_fit, sd = sd_fit)
+scaled_density <- normal_density * length(data) * diff(hist(data, breaks = 5)$breaks[1:2])
+lines(x, scaled_density, col = "red", lwd = 2)
+```
+
+# export data for excel exercise
+
+```{r}
+write.csv(gross_industry_totals22, "gross_industry_totals22.csv")
+```
+
+# next generate future samples
